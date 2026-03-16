@@ -202,6 +202,47 @@ def fetch_avatars_map(user_ids):
             continue
     return result
 
+def normalize_snapshot_players(players):
+    normalized_players = []
+    for player in players:
+        if not isinstance(player, dict):
+            continue
+        raw_user_id = player.get("user_id", player.get("userId", 0))
+        try:
+            user_id = int(raw_user_id)
+        except Exception:
+            continue
+        if user_id <= 0:
+            continue
+        username = str(player.get("username", player.get("name", user_id))).strip() or str(user_id)
+        display_name = str(player.get("display_name", player.get("displayName", username))).strip() or username
+        try:
+            account_age = int(player.get("account_age", player.get("accountAge", 0)) or 0)
+        except Exception:
+            account_age = 0
+        try:
+            deaths = int(player.get("deaths", 0) or 0)
+        except Exception:
+            deaths = 0
+        try:
+            coins = int(player.get("coins", 0) or 0)
+        except Exception:
+            coins = 0
+        try:
+            ping = int(player.get("ping", player.get("lastPingMs", 0)) or 0)
+        except Exception:
+            ping = 0
+        normalized_players.append({
+            "user_id": user_id,
+            "username": username,
+            "display_name": display_name,
+            "account_age": account_age,
+            "deaths": deaths,
+            "coins": coins,
+            "ping": ping
+        })
+    return normalized_players
+
 @app.route("/")
 def index():
     return send_from_directory(app.static_folder, "index.html")
@@ -521,11 +562,12 @@ def request_ping(job_id, user_id):
 @require_roblox_auth
 def roblox_heartbeat():
     data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", "")).strip()
-    place_id = int(data.get("place_id", 0) or 0)
-    player_count = int(data.get("player_count", 0) or 0)
+    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
+    place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
+    player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
     tps = float(data.get("tps", 20.0) or 20.0)
-    players = data.get("players", []) if isinstance(data.get("players", []), list) else []
+    players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
+    players = normalize_snapshot_players(players_raw)
 
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
@@ -533,16 +575,11 @@ def roblox_heartbeat():
     preview_ids = []
     preview_players = []
     for player in players[:5]:
-        try:
-            uid = int(player.get("user_id", 0))
-        except Exception:
-            uid = 0
-        if uid > 0:
-            preview_ids.append(uid)
+        preview_ids.append(player["user_id"])
         preview_players.append({
-            "userId": uid,
-            "username": str(player.get("username", "")).strip(),
-            "displayName": str(player.get("display_name", player.get("username", ""))).strip(),
+            "userId": player["user_id"],
+            "username": player["username"],
+            "displayName": player["display_name"],
             "avatarUrl": ""
         })
 
@@ -563,7 +600,7 @@ def roblox_heartbeat():
                     tps = EXCLUDED.tps,
                     first_players_json = EXCLUDED.first_players_json,
                     last_seen_at = NOW()
-            """, (job_id, place_id, player_count, tps, json.dumps(preview_players)))
+            """, (job_id, place_id, player_count if player_count > 0 else len(players), tps, json.dumps(preview_players)))
 
             cur.execute("""
                 SELECT id, job_id, user_id, action_type, payload_json
@@ -605,46 +642,20 @@ def roblox_heartbeat():
 @require_roblox_auth
 def roblox_snapshot():
     data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", "")).strip()
-    place_id = int(data.get("place_id", 0) or 0)
-    player_count = int(data.get("player_count", 0) or 0)
+    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
+    place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
+    player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
     tps = float(data.get("tps", 20.0) or 20.0)
-    players = data.get("players", []) if isinstance(data.get("players", []), list) else []
+    players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
 
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
 
-    normalized_players = []
-    avatar_ids = []
-
-    for player in players:
-        try:
-            uid = int(player.get("user_id", 0))
-        except Exception:
-            uid = 0
-        if uid <= 0:
-            continue
-        username = str(player.get("username", "")).strip() or str(uid)
-        display_name = str(player.get("display_name", username)).strip() or username
-        account_age = int(player.get("account_age", 0) or 0)
-        deaths = int(player.get("deaths", 0) or 0)
-        coins = int(player.get("coins", 0) or 0)
-        ping = int(player.get("ping", 0) or 0)
-        normalized_players.append({
-            "user_id": uid,
-            "username": username,
-            "display_name": display_name,
-            "account_age": account_age,
-            "deaths": deaths,
-            "coins": coins,
-            "ping": ping
-        })
-        avatar_ids.append(uid)
-
-    avatar_map = fetch_avatars_map(avatar_ids)
+    players = normalize_snapshot_players(players_raw)
+    avatar_map = fetch_avatars_map([player["user_id"] for player in players])
 
     first_players = []
-    for player in normalized_players[:5]:
+    for player in players[:5]:
         first_players.append({
             "userId": player["user_id"],
             "username": player["username"],
@@ -667,14 +678,14 @@ def roblox_snapshot():
             """, (
                 job_id,
                 place_id,
-                player_count if player_count > 0 else len(normalized_players),
+                player_count if player_count > 0 else len(players),
                 tps,
                 json.dumps(first_players)
             ))
 
             cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
 
-            for player in normalized_players:
+            for player in players:
                 cur.execute("""
                     INSERT INTO server_players (
                         job_id,
@@ -700,7 +711,7 @@ def roblox_snapshot():
                     player["ping"],
                     avatar_map.get(player["user_id"], "")
                 ))
-        return jsonify({"success": True, "players_saved": len(normalized_players)})
+        return jsonify({"success": True, "players_saved": len(players)})
     finally:
         db_release(conn)
 
@@ -708,7 +719,7 @@ def roblox_snapshot():
 @require_roblox_auth
 def roblox_offline():
     data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", "")).strip()
+    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
     conn = db()
