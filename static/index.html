@@ -1,1 +1,148 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+  <title>Roblox Moderation</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+</head>
+<body>
+  <div class="background-layer layer-a"></div>
+  <div class="background-layer layer-b"></div>
+  <div class="background-layer layer-c"></div>
 
+  <div class="app-shell">
+    <header class="hero glass-card">
+      <div class="hero-copy">
+        <div class="eyebrow">Roblox Moderation</div>
+        <h1>Control Center</h1>
+        <p id="hero-user-line">Проверяю доступ...</p>
+      </div>
+      <div class="hero-stats">
+        <div class="hero-stat">
+          <span>Серверов</span>
+          <strong id="stat-servers">0</strong>
+        </div>
+        <div class="hero-stat">
+          <span>Игроков</span>
+          <strong id="stat-players">0</strong>
+        </div>
+        <div class="hero-stat">
+          <span>Банов</span>
+          <strong id="stat-bans">0</strong>
+        </div>
+      </div>
+    </header>
+
+    <div id="lock-screen" class="lock-card glass-card">
+      <h2>Нужен запуск из Telegram</h2>
+      <p id="lock-text">Открой Mini App из сообщения бота.</p>
+    </div>
+
+    <main id="main-content" class="hidden">
+      <nav id="nav-segments" class="segmented glass-card">
+        <button class="segment-button active" data-view="servers">Сервера</button>
+        <button class="segment-button" data-view="search">Поиск игрока</button>
+        <button class="segment-button" data-view="ban">Бан-панель</button>
+      </nav>
+
+      <section id="view-servers" class="view active">
+        <div class="toolbar-row">
+          <div id="servers-status" class="status-pill">Обновление...</div>
+          <button id="refresh-servers-button" class="secondary-button">Обновить</button>
+        </div>
+        <div id="servers-list" class="stack"></div>
+      </section>
+
+      <section id="view-search" class="view">
+        <div class="search-bar glass-card">
+          <input id="player-search-input" type="text" placeholder="Username или DisplayName">
+          <button id="player-search-button" class="primary-button">Найти</button>
+        </div>
+        <div id="search-results" class="stack"></div>
+      </section>
+
+      <section id="view-ban" class="view">
+        <div class="search-bar glass-card">
+          <input id="ban-lookup-input" type="text" placeholder="Username Roblox">
+          <button id="ban-lookup-button" class="primary-button">Проверить</button>
+        </div>
+        <div id="ban-lookup-result" class="stack"></div>
+      </section>
+    </main>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <div id="server-panel" class="overlay sheet-overlay hidden">
+    <div class="overlay-backdrop" data-dismiss="server-panel"></div>
+    <div class="sheet-card glass-card">
+      <div class="overlay-header">
+        <div>
+          <div class="eyebrow">Сервер</div>
+          <h2>Детали сервера</h2>
+        </div>
+        <button id="close-server-panel" class="icon-button">✕</button>
+      </div>
+      <div id="server-panel-content" class="overlay-body"></div>
+    </div>
+  </div>
+
+  <div id="player-modal" class="overlay modal-overlay hidden">
+    <div class="overlay-backdrop" data-dismiss="player-modal"></div>
+    <div class="modal-card glass-card">
+      <div class="overlay-header">
+        <div>
+          <div class="eyebrow">Игрок</div>
+          <h2>Карточка игрока</h2>
+        </div>
+        <button id="close-player-modal" class="icon-button">✕</button>
+      </div>
+      <div id="player-modal-content" class="overlay-body"></div>
+    </div>
+  </div>
+
+  <div id="ban-modal" class="overlay modal-overlay hidden">
+    <div class="overlay-backdrop" data-dismiss="ban-modal"></div>
+    <div class="modal-card glass-card">
+      <div class="overlay-header">
+        <div>
+          <div class="eyebrow">Бан</div>
+          <h2>Оформление наказания</h2>
+        </div>
+        <button id="close-ban-modal" class="icon-button">✕</button>
+      </div>
+      <div class="overlay-body">
+        <div id="ban-target-card" class="target-card glass-card"></div>
+        <form id="ban-form" class="form-stack">
+          <label class="field">
+            <span>Причина</span>
+            <textarea id="ban-reason" rows="4" placeholder="Опиши причину бана"></textarea>
+          </label>
+
+          <div class="form-row">
+            <label class="field">
+              <span>Срок в днях</span>
+              <input id="ban-days" type="number" min="1" value="1">
+            </label>
+            <label class="checkbox-card">
+              <input id="ban-permanent" type="checkbox">
+              <span>Перманентный бан</span>
+            </label>
+          </div>
+
+          <label class="checkbox-card">
+            <input id="ban-alt" type="checkbox">
+            <span>Забанить твинки/альты</span>
+          </label>
+
+          <button type="submit" class="danger-gradient">Выдать бан</button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
