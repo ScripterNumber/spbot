@@ -7,6 +7,7 @@ const App = (() => {
     servers: [],
     currentServer: null,
     currentPlayer: null,
+    currentPlayerServerOpen: false,
     intervals: {
       servers: null,
       server: null,
@@ -432,7 +433,12 @@ const App = (() => {
     document.addEventListener("click", e => {
       const closeBtn = e.target.closest("[data-close-modal]");
       if (closeBtn) {
-        closeModal();
+        const isPlayer = closeBtn.closest(".modal[data-modal='player']");
+        if (isPlayer) {
+          closePlayerOnly();
+        } else {
+          closeModal();
+        }
       }
 
       const serverOpenBtn = e.target.closest("[data-open-server]");
@@ -457,7 +463,7 @@ const App = (() => {
 
       const killBtn = e.target.closest("[data-action-kill]");
       if (killBtn) {
-        executePlayerAction(killBtn.dataset.jobId, Number(kickBtn.dataset.actionKill), "kill");
+        executePlayerAction(killBtn.dataset.jobId, Number(killBtn.dataset.actionKill), "kill");
       }
 
       const banBtn = e.target.closest("[data-action-ban]");
@@ -569,7 +575,7 @@ const App = (() => {
       if (state.currentPlayer && state.currentPlayer.jobId === jobId && state.currentPlayer.userId === userId) {
         refreshPlayerModal(jobId, userId, false);
       }
-    }, 4000);
+    }, 5000);
   }
 
   async function api(path, options = {}) {
@@ -976,7 +982,7 @@ const App = (() => {
     }
   }
 
-  async function refreshServerModal(jobId, openIfMissing = false) {
+  async function refreshServerModal(jobId, shouldRender = true) {
     const data = await api(`/api/servers/${encodeURIComponent(jobId)}`);
     const server = normalizeServer(data?.server || {});
     const playersRaw = Array.isArray(data?.players) ? data.players : [];
@@ -984,7 +990,11 @@ const App = (() => {
     server.players = players;
     state.currentServer = server;
 
-    renderServerModal(server);
+    if (shouldRender) {
+      renderServerModal(server);
+    } else {
+      updateServerModal(server);
+    }
 
     if (state.currentPlayer && state.currentPlayer.jobId === jobId) {
       const exists = players.some(p => p.userId === state.currentPlayer.userId);
@@ -1008,75 +1018,8 @@ const App = (() => {
             <button class="modal-close" data-close-modal>${icons.close}</button>
           </div>
 
-          <div class="modal-body">
-            <div class="server-detail-grid">
-              <div class="section glass" style="padding:16px;">
-                <div class="section-head" style="margin-bottom:14px;">
-                  <div class="section-title-group">
-                    <div class="section-kicker">Players</div>
-                    <div class="section-title" style="font-size:20px;">Игроки на сервере</div>
-                    <div class="section-subtitle">Нажми на игрока, чтобы открыть карточку модерации.</div>
-                  </div>
-                </div>
-
-                <div class="player-list">
-                  ${
-                    server.players.length
-                      ? server.players.map(p => `
-                        <button class="player-card" data-open-player="${p.userId}" data-job-id="${escapeAttr(server.jobId)}">
-                          <div class="avatar">
-                            <img src="${escapeAttr(p.avatarUrl)}" alt="${escapeAttr(p.username)}">
-                          </div>
-                          <div class="player-meta">
-                            <div class="player-name">${escapeHtml(p.displayName)}</div>
-                            <div class="player-sub">@${escapeHtml(p.username)}</div>
-                            <div class="player-tags">
-                              <div class="tag">Возраст: ${p.accountAge}</div>
-                              <div class="tag">Монет: ${p.coins}</div>
-                              <div class="tag">Смертей: ${p.deaths}</div>
-                            </div>
-                          </div>
-                          <div class="btn btn-secondary">Открыть</div>
-                        </button>
-                      `).join("")
-                      : `
-                        <div class="list-state">
-                          <div>
-                            <div class="list-state-title">Игроков нет</div>
-                            <div>Сервер активен, но список игроков пуст.</div>
-                          </div>
-                        </div>
-                      `
-                  }
-                </div>
-              </div>
-
-              <div class="side-stack">
-                <div class="info-card glass">
-                  <div class="info-title">Игроков</div>
-                  <div class="info-value">${server.playerCount}</div>
-                  <div class="info-sub">Онлайн прямо сейчас</div>
-                </div>
-
-                <div class="info-card glass">
-                  <div class="info-title">TPS</div>
-                  <div class="info-value ${getTpsClass(server.tps)}">${formatNumber(server.tps, 1)}</div>
-                  <div class="info-sub">${tpsLabel(server.tps)}</div>
-                </div>
-
-                <div class="info-card glass">
-                  <div class="info-title">Uptime</div>
-                  <div class="info-value">${server.uptimeMinutes} мин</div>
-                  <div class="info-sub">С момента запуска сервера</div>
-                </div>
-
-                <div class="info-card glass">
-                  <div class="info-title">JobId</div>
-                  <div class="info-value" style="font-size:18px;">${escapeHtml(trimJobId(server.jobId))}</div>
-                  <div class="info-sub">${escapeHtml(server.jobId)}</div>
-                </div>
-              </div>
-            </div>
+          <div class="modal-body" id="serverModalBody">
+            ${renderServerModalBody(server)}
           </div>
         </div>
       </div>
@@ -1084,6 +1027,85 @@ const App = (() => {
     state.ui.modalLayer.style.pointerEvents = "auto";
     state.ui.modalLayer.innerHTML = modalHtml;
     state.ui.modalLayer.querySelector("[data-modal-backdrop]").addEventListener("click", closeModal);
+  }
+
+  function updateServerModal(server) {
+    const body = document.getElementById("serverModalBody");
+    if (!body) return;
+    body.innerHTML = renderServerModalBody(server);
+  }
+
+  function renderServerModalBody(server) {
+    return `
+      <div class="server-detail-grid">
+        <div class="section glass" style="padding:16px;">
+          <div class="section-head" style="margin-bottom:14px;">
+            <div class="section-title-group">
+              <div class="section-kicker">Players</div>
+              <div class="section-title" style="font-size:20px;">Игроки на сервере</div>
+              <div class="section-subtitle">Нажми на игрока, чтобы открыть карточку модерации.</div>
+            </div>
+          </div>
+
+          <div class="player-list">
+            ${
+              server.players.length
+                ? server.players.map(p => `
+                  <button class="player-card" data-open-player="${p.userId}" data-job-id="${escapeAttr(server.jobId)}">
+                    <div class="avatar">
+                      <img src="${escapeAttr(p.avatarUrl)}" alt="${escapeAttr(p.username)}">
+                    </div>
+                    <div class="player-meta">
+                      <div class="player-name">${escapeHtml(p.displayName)}</div>
+                      <div class="player-sub">@${escapeHtml(p.username)}</div>
+                      <div class="player-tags">
+                        <div class="tag">Возраст: ${p.accountAge}</div>
+                        <div class="tag">Монет: ${p.coins}</div>
+                        <div class="tag">Смертей: ${p.deaths}</div>
+                      </div>
+                    </div>
+                    <div class="btn btn-secondary">Открыть</div>
+                  </button>
+                `).join("")
+                : `
+                  <div class="list-state">
+                    <div>
+                      <div class="list-state-title">Игроков нет</div>
+                      <div>Сервер активен, но список игроков пуст.</div>
+                    </div>
+                  </div>
+                `
+            }
+          </div>
+        </div>
+
+        <div class="side-stack">
+          <div class="info-card glass">
+            <div class="info-title">Игроков</div>
+            <div class="info-value">${server.playerCount}</div>
+            <div class="info-sub">Онлайн прямо сейчас</div>
+          </div>
+
+          <div class="info-card glass">
+            <div class="info-title">TPS</div>
+            <div class="info-value ${getTpsClass(server.tps)}">${formatNumber(server.tps, 1)}</div>
+            <div class="info-sub">${tpsLabel(server.tps)}</div>
+          </div>
+
+          <div class="info-card glass">
+            <div class="info-title">Uptime</div>
+            <div class="info-value">${server.uptimeMinutes} мин</div>
+            <div class="info-sub">С момента запуска сервера</div>
+          </div>
+
+          <div class="info-card glass">
+            <div class="info-title">JobId</div>
+            <div class="info-value" style="font-size:18px;">${escapeHtml(trimJobId(server.jobId))}</div>
+            <div class="info-sub">${escapeHtml(server.jobId)}</div>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   async function openPlayerModal(jobId, userId) {
@@ -1095,12 +1117,20 @@ const App = (() => {
     }
   }
 
-  async function refreshPlayerModal(jobId, userId) {
+  async function refreshPlayerModal(jobId, userId, shouldRender = true) {
     const data = await api(`/api/servers/${encodeURIComponent(jobId)}/players/${userId}`);
     const player = normalizePlayer(data?.player || {});
     player.jobId = jobId;
     state.currentPlayer = player;
 
+    if (shouldRender) {
+      renderPlayerModal(player);
+    } else {
+      updatePlayerModal(player);
+    }
+  }
+
+  function renderPlayerModal(player) {
     const existing = document.querySelector(".modal[data-modal='player']");
     const modalHtml = `
       <div class="modal glass visible" data-modal="player" style="z-index:3;">
@@ -1113,97 +1143,8 @@ const App = (() => {
             <button class="modal-close" data-close-modal>${icons.close}</button>
           </div>
 
-          <div class="modal-body">
-            <div class="player-modal-grid">
-              <div class="player-panel">
-                <div class="player-overview glass">
-                  <div class="player-avatar-lg">
-                    <img src="${escapeAttr(player.avatarUrl)}" alt="${escapeAttr(player.username)}">
-                  </div>
-                  <div class="player-overview-meta">
-                    <div class="player-overview-name">${escapeHtml(player.displayName)}</div>
-                    <div class="player-overview-sub">@${escapeHtml(player.username)} • UserId: ${player.userId || "—"}</div>
-                    <div class="player-tags" style="margin-top:12px;">
-                      <div class="tag">Возраст: ${player.accountAge}</div>
-                      <div class="tag">Смертей: ${player.deaths}</div>
-                      <div class="tag">Монет: ${player.coins}</div>
-                    </div>
-                  </div>
-                </div>
-
-                <div class="stat-grid">
-                  <div class="stat-card glass">
-                    <div class="stat-key">Username</div>
-                    <div class="stat-val">${escapeHtml(player.username)}</div>
-                  </div>
-                  <div class="stat-card glass">
-                    <div class="stat-key">DisplayName</div>
-                    <div class="stat-val">${escapeHtml(player.displayName)}</div>
-                  </div>
-                  <div class="stat-card glass">
-                    <div class="stat-key">Возраст</div>
-                    <div class="stat-val">${player.accountAge}</div>
-                  </div>
-                  <div class="stat-card glass">
-                    <div class="stat-key">Пинг</div>
-                    <div class="stat-val">${player.ping !== null && player.ping !== undefined ? `${Number(player.ping).toFixed(0)} ms` : "—"}</div>
-                  </div>
-                  <div class="stat-card glass">
-                    <div class="stat-key">Смертей</div>
-                    <div class="stat-val">${player.deaths}</div>
-                  </div>
-                  <div class="stat-card glass">
-                    <div class="stat-key">Монет</div>
-                    <div class="stat-val">${player.coins}</div>
-                  </div>
-                  <div class="stat-card glass" style="grid-column:1 / -1;">
-                    <div class="stat-key">JobId сервера</div>
-                    <div class="stat-val" style="font-size:18px;">${escapeHtml(player.jobId)}</div>
-                  </div>
-                </div>
-              </div>
-
-              <div class="player-panel">
-                <div class="action-grid">
-                  <div class="action-card glass">
-                    <div class="action-title">Быстрые действия</div>
-                    <div class="action-sub">Выполнение идёт через очередь команд Roblox-серверу.</div>
-                    <div class="action-row">
-                      <button class="btn btn-secondary" data-player-ping="${player.userId}" data-job-id="${escapeAttr(jobId)}">Узнать пинг</button>
-                      <button class="btn btn-warning" data-action-kill="${player.userId}" data-job-id="${escapeAttr(jobId)}">Убить</button>
-                      <button class="btn btn-danger" data-action-kick="${player.userId}" data-job-id="${escapeAttr(jobId)}">Кикнуть</button>
-                    </div>
-                  </div>
-
-                  <div class="action-card glass">
-                    <div class="action-title">Забанить игрока</div>
-                    <div class="action-sub">Укажи срок в днях, причину и отправь бан прямо из карточки игрока.</div>
-                    <div class="player-quick-ban">
-                      <div class="field">
-                        <div class="label">Длительность в днях</div>
-                        <input class="input" id="quickBanDaysInput" type="number" min="0" step="1" placeholder="0 = перманентно" />
-                      </div>
-
-                      <div class="field">
-                        <div class="label">Причина</div>
-                        <textarea class="textarea" id="quickBanReasonInput" placeholder="Укажи причину бана"></textarea>
-                      </div>
-
-                      <div class="field">
-                        <label class="checkbox-row">
-                          <input id="quickBanAltsInput" type="checkbox" />
-                          <span>Пометить попытку бана твинков/альтов</span>
-                        </label>
-                      </div>
-
-                      <div class="field">
-                        <button class="btn btn-danger" data-action-ban="${player.userId}" data-job-id="${escapeAttr(jobId)}">Забанить</button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
+          <div class="modal-body" id="playerModalBody">
+            ${renderPlayerModalBody(player)}
           </div>
         </div>
       </div>
@@ -1214,6 +1155,107 @@ const App = (() => {
     } else {
       state.ui.modalLayer.insertAdjacentHTML("beforeend", modalHtml);
     }
+  }
+
+  function updatePlayerModal(player) {
+    const body = document.getElementById("playerModalBody");
+    if (!body) return;
+    body.innerHTML = renderPlayerModalBody(player);
+  }
+
+  function renderPlayerModalBody(player) {
+    return `
+      <div class="player-modal-grid">
+        <div class="player-panel">
+          <div class="player-overview glass">
+            <div class="player-avatar-lg">
+              <img src="${escapeAttr(player.avatarUrl)}" alt="${escapeAttr(player.username)}">
+            </div>
+            <div class="player-overview-meta">
+              <div class="player-overview-name">${escapeHtml(player.displayName)}</div>
+              <div class="player-overview-sub">@${escapeHtml(player.username)} • UserId: ${player.userId || "—"}</div>
+              <div class="player-tags" style="margin-top:12px;">
+                <div class="tag">Возраст: ${player.accountAge}</div>
+                <div class="tag">Смертей: ${player.deaths}</div>
+                <div class="tag">Монет: ${player.coins}</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="stat-grid">
+            <div class="stat-card glass">
+              <div class="stat-key">Username</div>
+              <div class="stat-val">${escapeHtml(player.username)}</div>
+            </div>
+            <div class="stat-card glass">
+              <div class="stat-key">DisplayName</div>
+              <div class="stat-val">${escapeHtml(player.displayName)}</div>
+            </div>
+            <div class="stat-card glass">
+              <div class="stat-key">Возраст</div>
+              <div class="stat-val">${player.accountAge}</div>
+            </div>
+            <div class="stat-card glass">
+              <div class="stat-key">Пинг</div>
+              <div class="stat-val">${player.ping !== null && player.ping !== undefined ? `${Number(player.ping).toFixed(0)} ms` : "—"}</div>
+            </div>
+            <div class="stat-card glass">
+              <div class="stat-key">Смертей</div>
+              <div class="stat-val">${player.deaths}</div>
+            </div>
+            <div class="stat-card glass">
+              <div class="stat-key">Монет</div>
+              <div class="stat-val">${player.coins}</div>
+            </div>
+            <div class="stat-card glass" style="grid-column:1 / -1;">
+              <div class="stat-key">JobId сервера</div>
+              <div class="stat-val" style="font-size:18px;">${escapeHtml(player.jobId)}</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="player-panel">
+          <div class="action-grid">
+            <div class="action-card glass">
+              <div class="action-title">Быстрые действия</div>
+              <div class="action-sub">Выполнение идёт через очередь команд Roblox-серверу.</div>
+              <div class="action-row">
+                <button class="btn btn-secondary" data-player-ping="${player.userId}" data-job-id="${escapeAttr(player.jobId)}">Узнать пинг</button>
+                <button class="btn btn-warning" data-action-kill="${player.userId}" data-job-id="${escapeAttr(player.jobId)}">Убить</button>
+                <button class="btn btn-danger" data-action-kick="${player.userId}" data-job-id="${escapeAttr(player.jobId)}">Кикнуть</button>
+              </div>
+            </div>
+
+            <div class="action-card glass">
+              <div class="action-title">Забанить игрока</div>
+              <div class="action-sub">Укажи срок в днях, причину и отправь бан прямо из карточки игрока.</div>
+              <div class="player-quick-ban">
+                <div class="field">
+                  <div class="label">Длительность в днях</div>
+                  <input class="input" id="quickBanDaysInput" type="number" min="0" step="1" placeholder="0 = перманентно" />
+                </div>
+
+                <div class="field">
+                  <div class="label">Причина</div>
+                  <textarea class="textarea" id="quickBanReasonInput" placeholder="Укажи причину бана"></textarea>
+                </div>
+
+                <div class="field">
+                  <label class="checkbox-row">
+                    <input id="quickBanAltsInput" type="checkbox" />
+                    <span>Пометить попытку бана твинков/альтов</span>
+                  </label>
+                </div>
+
+                <div class="field">
+                  <button class="btn btn-danger" data-action-ban="${player.userId}" data-job-id="${escapeAttr(player.jobId)}">Забанить</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   async function requestPlayerPing(jobId, userId, button) {
@@ -1234,7 +1276,7 @@ const App = (() => {
       state.pingCooldowns.set(key, Date.now() + 5000);
       showToast("Запрос отправлен", "Сервер получил команду измерить пинг игрока.");
       setTimeout(() => {
-        refreshPlayerModal(jobId, userId).catch(() => {});
+        refreshPlayerModal(jobId, userId, false).catch(() => {});
       }, 1500);
     } catch (err) {
       showToast("Ошибка запроса пинга", err.message || "Не удалось запросить пинг.");
@@ -1315,10 +1357,6 @@ const App = (() => {
     state.currentPlayer = null;
     const playerModal = document.querySelector(".modal[data-modal='player']");
     if (playerModal) playerModal.remove();
-    const backdrop = document.querySelector(".modal-backdrop");
-    if (!document.querySelector(".modal[data-modal='server']") && backdrop) {
-      backdrop.remove();
-    }
   }
 
   function updateSyncTime() {
