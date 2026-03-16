@@ -14,8 +14,22 @@ app = Flask(__name__)
 
 DB_URL = os.environ.get("DATABASE_URL")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
-ADMIN_IDS = [int(x.strip()) for x in os.environ.get("TELEGRAM_ADMIN_IDS", "").split(",") if x.strip().isdigit()]
 ROBLOX_SECRET = os.environ.get("ROBLOX_SHARED_SECRET", "default_secret")
+
+# Умный парсинг админов (поддерживает и ID, и Username)
+ADMINS_ENV = os.environ.get("TELEGRAM_ADMINS", "TickFreezek, ipvp6").split(",")
+ADMINS_ENV += os.environ.get("TELEGRAM_ADMIN_IDS", "").split(",")
+ADMIN_IDS = []
+ADMIN_USERNAMES = []
+
+for x in ADMINS_ENV:
+    x = x.strip()
+    if not x: continue
+    if x.isdigit() or (x.startswith('-') and x[1:].isdigit()):
+        ADMIN_IDS.append(int(x))
+    else:
+        # Убираем @ если человек написал с собачкой, и переводим в нижний регистр
+        ADMIN_USERNAMES.append(x.lower().lstrip('@'))
 
 db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, DB_URL)
 
@@ -26,6 +40,19 @@ def get_db():
 
 def release_db(conn):
     db_pool.putconn(conn)
+
+# Автоматическое добавление колонки ping, если её не было
+def setup_database():
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("ALTER TABLE server_players ADD COLUMN IF NOT EXISTS ping INT DEFAULT 0;")
+    except Exception:
+        pass
+    finally:
+        release_db(conn)
+
+setup_database()
 
 def verify_telegram_data(init_data):
     if not init_data:
@@ -51,8 +78,15 @@ def require_auth(f):
             return f(*args, **kwargs)
         init_data = request.headers.get("X-Telegram-Init-Data")
         valid, user = verify_telegram_data(init_data)
-        if not valid or (user.get('id') not in ADMIN_IDS and ADMIN_IDS):
+        if not valid:
             return jsonify({"error": "Unauthorized"}), 403
+            
+        u_id = user.get('id', 0)
+        u_name = user.get('username', '').lower()
+        
+        if (u_id not in ADMIN_IDS) and (u_name not in ADMIN_USERNAMES):
+            return jsonify({"error": "Unauthorized"}), 403
+            
         return f(*args, **kwargs)
     wrapper.__name__ = f.__name__
     return wrapper
@@ -82,9 +116,12 @@ def telegram_webhook():
     
     chat_id = data['message']['chat']['id']
     text = data['message'].get('text', '')
-    user_id = data['message']['from']['id']
+    
+    u_id = data['message']['from'].get('id', 0)
+    u_name = data['message']['from'].get('username', '').lower()
 
-    if user_id not in ADMIN_IDS and ADMIN_IDS:
+    # Проверка админа по ID или Username
+    if (u_id not in ADMIN_IDS) and (u_name not in ADMIN_USERNAMES):
         return jsonify({"status": "ok"}), 200
 
     if text == '/start':
@@ -110,10 +147,7 @@ def get_servers():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                DELETE FROM servers 
-                WHERE last_seen_at < NOW() - INTERVAL '3 minutes'
-            """)
+            cur.execute("DELETE FROM servers WHERE last_seen_at < NOW() - INTERVAL '3 minutes'")
             cur.execute("SELECT * FROM servers ORDER BY player_count DESC")
             servers = cur.fetchall()
             for s in servers:
@@ -344,12 +378,22 @@ def roblox_snapshot():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            # 1. ЗАЩИТА ОТ ПРОПАЖИ ИГРОКОВ: Сначала резервируем сервер, если heartbeat еще не успел
+            cur.execute("""
+                INSERT INTO servers (job_id, last_seen_at) 
+                VALUES (%s, NOW()) 
+                ON CONFLICT (job_id) DO NOTHING
+            """, (job_id,))
+            
+            # 2. Теперь спокойно сохраняем список
             cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
             for p in players:
                 cur.execute("""
-                    INSERT INTO server_players (job_id, user_id, username, display_name, account_age, deaths, coins, avatar_url, last_seen_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """, (job_id, p['user_id'], p['username'], p['display_name'], p.get('account_age', 0), p.get('deaths', 0), p.get('coins', 0), p.get('avatar_url', '')))
+                    INSERT INTO server_players (job_id, user_id, username, display_name, account_age, deaths, coins, ping, avatar_url, last_seen_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                """, (job_id, p['user_id'], p['username'], p['display_name'], 
+                      p.get('account_age', 0), p.get('deaths', 0), p.get('coins', 0), p.get('ping', 0),
+                      p.get('avatar_url', '')))
         return jsonify({"success": True})
     finally:
         release_db(conn)
