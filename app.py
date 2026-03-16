@@ -243,25 +243,23 @@ def index():
 def health():
     return jsonify({"ok": True})
 
-@app.route("/api/debug/server-players")
-def debug_server_players():
-    conn = get_db()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("SELECT * FROM server_players ORDER BY last_seen_at DESC LIMIT 100")
-            rows = cur.fetchall()
-            return jsonify({"rows": rows})
-    finally:
-        release_db(conn)
-
 @app.route("/api/debug/servers")
 def debug_servers():
     conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM servers ORDER BY last_seen_at DESC LIMIT 100")
-            rows = cur.fetchall()
-            return jsonify({"rows": rows})
+            return jsonify({"rows": cur.fetchall()})
+    finally:
+        release_db(conn)
+
+@app.route("/api/debug/server-players")
+def debug_server_players():
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM server_players ORDER BY last_seen_at DESC LIMIT 100")
+            return jsonify({"rows": cur.fetchall()})
     finally:
         release_db(conn)
 
@@ -296,6 +294,179 @@ def telegram_webhook():
             timeout=10
         )
     return jsonify({"ok": True})
+
+@app.route("/roblox/heartbeat", methods=["POST"])
+@require_roblox_auth
+def roblox_heartbeat():
+    data = request.get_json(silent=True) or {}
+    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
+    place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
+    player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
+    tps = float(data.get("tps", 20.0) or 20.0)
+    players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
+    players = normalize_players(players_raw)
+
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+
+    preview_ids = []
+    preview_players = []
+    for player in players[:5]:
+        preview_ids.append(player["user_id"])
+        preview_players.append({
+            "userId": player["user_id"],
+            "username": player["username"],
+            "displayName": player["display_name"],
+            "avatarUrl": ""
+        })
+
+    avatar_map = fetch_avatars_map(preview_ids)
+    for item in preview_players:
+        if item["userId"] in avatar_map:
+            item["avatarUrl"] = avatar_map[item["userId"]]
+
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                INSERT INTO servers (job_id, place_id, player_count, tps, first_players_json, last_seen_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (job_id) DO UPDATE SET
+                    place_id = EXCLUDED.place_id,
+                    player_count = EXCLUDED.player_count,
+                    tps = EXCLUDED.tps,
+                    first_players_json = EXCLUDED.first_players_json,
+                    last_seen_at = NOW()
+            """, (job_id, place_id, player_count if player_count > 0 else len(players), tps, json.dumps(preview_players)))
+
+            cur.execute("""
+                SELECT id, job_id, user_id, action_type, payload_json
+                FROM action_queue
+                WHERE job_id = %s AND status = 'pending'
+                ORDER BY id ASC
+                LIMIT 50
+            """, (job_id,))
+            actions = cur.fetchall()
+
+            if actions:
+                ids = [str(int(action["id"])) for action in actions]
+                cur.execute(f"UPDATE action_queue SET status = 'sent' WHERE id IN ({','.join(ids)})")
+
+            cur.execute("SELECT user_id FROM bans WHERE active = TRUE")
+            bans = [int(row["user_id"]) for row in cur.fetchall()]
+
+        normalized_actions = []
+        for action in actions:
+            payload = action.get("payload_json")
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except Exception:
+                    payload = {}
+            normalized_actions.append({
+                "id": int(action["id"]),
+                "job_id": action["job_id"],
+                "user_id": int(action["user_id"]) if action["user_id"] is not None else None,
+                "action_type": action["action_type"],
+                "payload_json": payload or {}
+            })
+
+        return jsonify({"actions": normalized_actions, "active_bans": bans})
+    finally:
+        release_db(conn)
+
+@app.route("/roblox/snapshot", methods=["POST"])
+@require_roblox_auth
+def roblox_snapshot():
+    data = request.get_json(silent=True) or {}
+    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
+    place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
+    player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
+    tps = float(data.get("tps", 20.0) or 20.0)
+    players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
+
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+
+    players = normalize_players(players_raw)
+    avatar_map = fetch_avatars_map([player["user_id"] for player in players])
+
+    first_players = []
+    for player in players[:5]:
+        first_players.append({
+            "userId": player["user_id"],
+            "username": player["username"],
+            "displayName": player["display_name"],
+            "avatarUrl": avatar_map.get(player["user_id"], "")
+        })
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO servers (job_id, place_id, player_count, tps, first_players_json, last_seen_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (job_id) DO UPDATE SET
+                    place_id = EXCLUDED.place_id,
+                    player_count = EXCLUDED.player_count,
+                    tps = EXCLUDED.tps,
+                    first_players_json = EXCLUDED.first_players_json,
+                    last_seen_at = NOW()
+            """, (
+                job_id,
+                place_id,
+                player_count if player_count > 0 else len(players),
+                tps,
+                json.dumps(first_players)
+            ))
+
+            cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
+
+            for player in players:
+                cur.execute("""
+                    INSERT INTO server_players (
+                        job_id,
+                        user_id,
+                        username,
+                        display_name,
+                        account_age,
+                        deaths,
+                        coins,
+                        ping,
+                        avatar_url,
+                        last_seen_at
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                """, (
+                    job_id,
+                    player["user_id"],
+                    player["username"],
+                    player["display_name"],
+                    player["account_age"],
+                    player["deaths"],
+                    player["coins"],
+                    player["ping"],
+                    avatar_map.get(player["user_id"], "")
+                ))
+        return jsonify({"success": True, "players_saved": len(players)})
+    finally:
+        release_db(conn)
+
+@app.route("/roblox/offline", methods=["POST"])
+@require_roblox_auth
+def roblox_offline():
+    data = request.get_json(silent=True) or {}
+    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
+            cur.execute("DELETE FROM servers WHERE job_id = %s", (job_id,))
+        return jsonify({"success": True})
+    finally:
+        release_db(conn)
 
 @app.route("/api/servers", methods=["GET"])
 @require_auth
@@ -614,22 +785,6 @@ def api_request_ping(job_id, user_id):
                 INSERT INTO action_queue (job_id, user_id, action_type, payload_json, status)
                 VALUES (%s, %s, 'get_ping', '{}'::jsonb, 'pending')
             """, (job_id, user_id))
-        return jsonify({"success": True})
-    finally:
-        release_db(conn)
-
-@app.route("/roblox/offline", methods=["POST"])
-@require_roblox_auth
-def roblox_offline():
-    data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
-    if not job_id:
-        return jsonify({"error": "job_id required"}), 400
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
-            cur.execute("DELETE FROM servers WHERE job_id = %s", (job_id,))
         return jsonify({"success": True})
     finally:
         release_db(conn)
