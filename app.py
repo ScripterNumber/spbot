@@ -16,7 +16,6 @@ DB_URL = os.environ.get("DATABASE_URL")
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ROBLOX_SECRET = os.environ.get("ROBLOX_SHARED_SECRET", "default_secret")
 
-# Умный парсинг админов (поддерживает и ID, и Username)
 ADMINS_ENV = os.environ.get("TELEGRAM_ADMINS", "TickFreezek, ipvp6").split(",")
 ADMINS_ENV += os.environ.get("TELEGRAM_ADMIN_IDS", "").split(",")
 ADMIN_IDS = []
@@ -28,7 +27,6 @@ for x in ADMINS_ENV:
     if x.isdigit() or (x.startswith('-') and x[1:].isdigit()):
         ADMIN_IDS.append(int(x))
     else:
-        # Убираем @ если человек написал с собачкой, и переводим в нижний регистр
         ADMIN_USERNAMES.append(x.lower().lstrip('@'))
 
 db_pool = psycopg2.pool.SimpleConnectionPool(1, 10, DB_URL)
@@ -41,27 +39,41 @@ def get_db():
 def release_db(conn):
     db_pool.putconn(conn)
 
-# Автоматическое добавление колонки ping, если её не было
+# Жесткая авто-починка базы данных при запуске
 def setup_database():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS server_players (
+                    job_id TEXT,
+                    user_id BIGINT,
+                    username TEXT,
+                    display_name TEXT,
+                    account_age INT DEFAULT 0,
+                    deaths INT DEFAULT 0,
+                    coins INT DEFAULT 0,
+                    ping INT DEFAULT 0,
+                    avatar_url TEXT,
+                    last_seen_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (job_id, user_id)
+                )
+            """)
             cur.execute("ALTER TABLE server_players ADD COLUMN IF NOT EXISTS ping INT DEFAULT 0;")
-    except Exception:
-        pass
+            cur.execute("ALTER TABLE server_players ADD COLUMN IF NOT EXISTS avatar_url TEXT;")
+    except Exception as e:
+        print("DB Setup Warning:", e)
     finally:
         release_db(conn)
 
 setup_database()
 
 def verify_telegram_data(init_data):
-    if not init_data:
-        return False, None
+    if not init_data: return False, None
     try:
         parsed_data = dict(x.split('=') for x in unquote(init_data).split('&'))
         hash_val = parsed_data.pop('hash', None)
-        if not hash_val:
-            return False, None
+        if not hash_val: return False, None
         data_check_string = '\n'.join(f"{k}={v}" for k, v in sorted(parsed_data.items()))
         secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode(), hashlib.sha256).digest()
         calc_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
@@ -74,12 +86,10 @@ def verify_telegram_data(init_data):
 
 def require_auth(f):
     def wrapper(*args, **kwargs):
-        if app.debug:
-            return f(*args, **kwargs)
+        if app.debug: return f(*args, **kwargs)
         init_data = request.headers.get("X-Telegram-Init-Data")
         valid, user = verify_telegram_data(init_data)
-        if not valid:
-            return jsonify({"error": "Unauthorized"}), 403
+        if not valid: return jsonify({"error": "Unauthorized"}), 403
             
         u_id = user.get('id', 0)
         u_name = user.get('username', '').lower()
@@ -120,7 +130,6 @@ def telegram_webhook():
     u_id = data['message']['from'].get('id', 0)
     u_name = data['message']['from'].get('username', '').lower()
 
-    # Проверка админа по ID или Username
     if (u_id not in ADMIN_IDS) and (u_name not in ADMIN_USERNAMES):
         return jsonify({"status": "ok"}), 200
 
@@ -131,10 +140,7 @@ def telegram_webhook():
             "chat_id": chat_id,
             "text": "Панель модерации активна. Нажми кнопку ниже, чтобы войти.",
             "reply_markup": {
-                "inline_keyboard": [[{
-                    "text": "Открыть Moderation Center",
-                    "web_app": {"url": webapp_url}
-                }]]
+                "inline_keyboard": [[{"text": "Открыть Moderation Center", "web_app": {"url": webapp_url}}]]
             }
         }
         requests.post(url, json=payload)
@@ -168,7 +174,6 @@ def get_server_detail(job_id):
             server = cur.fetchone()
             if not server:
                 return jsonify({"error": "Server not found"}), 404
-            
             cur.execute("SELECT * FROM server_players WHERE job_id = %s", (job_id,))
             players = cur.fetchall()
             return jsonify({"server": server, "players": players})
@@ -193,8 +198,7 @@ def get_player_detail(job_id, user_id):
 @require_auth
 def search_players():
     q = request.args.get('q', '').strip()
-    if not q:
-        return jsonify([]), 200
+    if not q: return jsonify([]), 200
     
     conn = get_db()
     try:
@@ -294,14 +298,12 @@ def request_ping(job_id, user_id):
 @require_auth
 def roblox_user_lookup():
     username = request.args.get('username')
-    if not username:
-        return jsonify({"error": "Username required"}), 400
+    if not username: return jsonify({"error": "Username required"}), 400
         
     try:
         res = requests.post("https://users.roblox.com/v1/usernames/users", json={"usernames": [username], "excludeBannedUsers": False})
         data = res.json()
-        if not data.get("data"):
-            return jsonify({"error": "User not found"}), 404
+        if not data.get("data"): return jsonify({"error": "User not found"}), 404
             
         user_info = data["data"][0]
         user_id = user_info["id"]
@@ -378,22 +380,29 @@ def roblox_snapshot():
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            # 1. ЗАЩИТА ОТ ПРОПАЖИ ИГРОКОВ: Сначала резервируем сервер, если heartbeat еще не успел
             cur.execute("""
                 INSERT INTO servers (job_id, last_seen_at) 
                 VALUES (%s, NOW()) 
                 ON CONFLICT (job_id) DO NOTHING
             """, (job_id,))
             
-            # 2. Теперь спокойно сохраняем список
             cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
             for p in players:
+                # Жесткая защита типов
                 cur.execute("""
                     INSERT INTO server_players (job_id, user_id, username, display_name, account_age, deaths, coins, ping, avatar_url, last_seen_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """, (job_id, p['user_id'], p['username'], p['display_name'], 
-                      p.get('account_age', 0), p.get('deaths', 0), p.get('coins', 0), p.get('ping', 0),
-                      p.get('avatar_url', '')))
+                """, (
+                    job_id, 
+                    int(p.get('user_id', 0)), 
+                    str(p.get('username', 'Unknown')), 
+                    str(p.get('display_name', 'Unknown')), 
+                    int(p.get('account_age', 0)), 
+                    int(p.get('deaths', 0)), 
+                    int(p.get('coins', 0)), 
+                    int(p.get('ping', 0)), 
+                    str(p.get('avatar_url', ''))
+                ))
         return jsonify({"success": True})
     finally:
         release_db(conn)
