@@ -2,13 +2,14 @@ import os
 import json
 import hmac
 import hashlib
-import requests
 from urllib.parse import parse_qsl
 from datetime import datetime, timedelta, timezone
-from flask import Flask, request, jsonify, send_from_directory
+
+import requests
 import psycopg2
 from psycopg2 import pool
 from psycopg2.extras import RealDictCursor
+from flask import Flask, request, jsonify, send_from_directory
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
 
@@ -97,6 +98,9 @@ def setup_database():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_job_id ON server_players(job_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_username ON server_players(username)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_display_name ON server_players(display_name)")
     finally:
         release_db(conn)
 
@@ -261,162 +265,37 @@ def debug_servers():
     finally:
         release_db(conn)
 
-@app.route("/roblox/snapshot", methods=["POST"])
-@require_roblox_auth
-def roblox_snapshot():
+@app.route("/webhook", methods=["POST"])
+def telegram_webhook():
     data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
-    place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
-    player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
-    tps = float(data.get("tps", 20.0) or 20.0)
-    players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
+    message = data.get("message") or {}
+    chat = message.get("chat") or {}
+    from_user = message.get("from") or {}
+    text = (message.get("text") or "").strip()
 
-    if not job_id:
-        return jsonify({"error": "job_id required"}), 400
+    if not chat:
+        return jsonify({"ok": True})
 
-    players = normalize_players(players_raw)
-    avatar_map = fetch_avatars_map([player["user_id"] for player in players])
+    if not is_admin(from_user):
+        return jsonify({"ok": True})
 
-    first_players = []
-    for player in players[:5]:
-        first_players.append({
-            "userId": player["user_id"],
-            "username": player["username"],
-            "displayName": player["display_name"],
-            "avatarUrl": avatar_map.get(player["user_id"], "")
-        })
-
-    conn = get_db()
-    try:
-        with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO servers (job_id, place_id, player_count, tps, first_players_json, last_seen_at)
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (job_id) DO UPDATE SET
-                    place_id = EXCLUDED.place_id,
-                    player_count = EXCLUDED.player_count,
-                    tps = EXCLUDED.tps,
-                    first_players_json = EXCLUDED.first_players_json,
-                    last_seen_at = NOW()
-            """, (
-                job_id,
-                place_id,
-                player_count if player_count > 0 else len(players),
-                tps,
-                json.dumps(first_players)
-            ))
-
-            cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
-
-            for player in players:
-                cur.execute("""
-                    INSERT INTO server_players (
-                        job_id,
-                        user_id,
-                        username,
-                        display_name,
-                        account_age,
-                        deaths,
-                        coins,
-                        ping,
-                        avatar_url,
-                        last_seen_at
-                    )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                """, (
-                    job_id,
-                    player["user_id"],
-                    player["username"],
-                    player["display_name"],
-                    player["account_age"],
-                    player["deaths"],
-                    player["coins"],
-                    player["ping"],
-                    avatar_map.get(player["user_id"], "")
-                ))
-        return jsonify({"success": True, "players_saved": len(players)})
-    finally:
-        release_db(conn)
-
-@app.route("/roblox/heartbeat", methods=["POST"])
-@require_roblox_auth
-def roblox_heartbeat():
-    data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
-    place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
-    player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
-    tps = float(data.get("tps", 20.0) or 20.0)
-    players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
-    players = normalize_players(players_raw)
-
-    if not job_id:
-        return jsonify({"error": "job_id required"}), 400
-
-    preview_ids = []
-    preview_players = []
-    for player in players[:5]:
-        preview_ids.append(player["user_id"])
-        preview_players.append({
-            "userId": player["user_id"],
-            "username": player["username"],
-            "displayName": player["display_name"],
-            "avatarUrl": ""
-        })
-
-    avatar_map = fetch_avatars_map(preview_ids)
-    for item in preview_players:
-        if item["userId"] in avatar_map:
-            item["avatarUrl"] = avatar_map[item["userId"]]
-
-    conn = get_db()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                INSERT INTO servers (job_id, place_id, player_count, tps, first_players_json, last_seen_at)
-                VALUES (%s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (job_id) DO UPDATE SET
-                    place_id = EXCLUDED.place_id,
-                    player_count = EXCLUDED.player_count,
-                    tps = EXCLUDED.tps,
-                    first_players_json = EXCLUDED.first_players_json,
-                    last_seen_at = NOW()
-            """, (job_id, place_id, player_count if player_count > 0 else len(players), tps, json.dumps(preview_players)))
-
-            cur.execute("""
-                SELECT id, job_id, user_id, action_type, payload_json
-                FROM action_queue
-                WHERE job_id = %s AND status = 'pending'
-                ORDER BY id ASC
-                LIMIT 50
-            """, (job_id,))
-            actions = cur.fetchall()
-
-            if actions:
-                ids = [str(int(action["id"])) for action in actions]
-                cur.execute(f"UPDATE action_queue SET status = 'sent' WHERE id IN ({','.join(ids)})")
-
-            cur.execute("SELECT user_id FROM bans WHERE active = TRUE")
-            bans = [int(row["user_id"]) for row in cur.fetchall()]
-
-        normalized_actions = []
-        for action in actions:
-            payload = action.get("payload_json")
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except Exception:
-                    payload = {}
-            normalized_actions.append({
-                "id": int(action["id"]),
-                "job_id": action["job_id"],
-                "user_id": int(action["user_id"]) if action["user_id"] is not None else None,
-                "action_type": action["action_type"],
-                "payload_json": payload or {}
-            })
-
-        return jsonify({"actions": normalized_actions, "active_bans": bans})
-    finally:
-        release_db(conn)
+    if text == "/start":
+        webapp_url = request.host_url.replace("http://", "https://").rstrip("/")
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat.get("id"),
+                "text": "Панель модерации активна. Нажми кнопку ниже, чтобы открыть Mini App.",
+                "reply_markup": {
+                    "inline_keyboard": [[{
+                        "text": "Открыть Moderation Center",
+                        "web_app": {"url": webapp_url}
+                    }]]
+                }
+            },
+            timeout=10
+        )
+    return jsonify({"ok": True})
 
 @app.route("/api/servers", methods=["GET"])
 @require_auth
@@ -503,6 +382,36 @@ def api_server_detail(job_id):
     finally:
         release_db(conn)
 
+@app.route("/api/servers/<job_id>/players/<int:user_id>", methods=["GET"])
+@require_auth
+def api_server_player(job_id, user_id):
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT job_id, user_id, username, display_name, account_age, deaths, coins, ping, avatar_url, last_seen_at
+                FROM server_players
+                WHERE job_id = %s AND user_id = %s
+            """, (job_id, user_id))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"error": "Player not found"}), 404
+            return jsonify({
+                "player": {
+                    "jobId": row["job_id"],
+                    "userId": int(row["user_id"]),
+                    "username": row["username"],
+                    "displayName": row["display_name"],
+                    "accountAge": int(row.get("account_age", 0) or 0),
+                    "deaths": int(row.get("deaths", 0) or 0),
+                    "coins": int(row.get("coins", 0) or 0),
+                    "ping": int(row.get("ping", 0) or 0),
+                    "avatarUrl": row.get("avatar_url", "")
+                }
+            })
+    finally:
+        release_db(conn)
+
 @app.route("/api/search/players", methods=["GET"])
 @require_auth
 def api_search_players():
@@ -556,6 +465,172 @@ def api_search_players():
                     }
                 })
         return jsonify({"results": results})
+    finally:
+        release_db(conn)
+
+@app.route("/api/roblox/user", methods=["GET"])
+@require_auth
+def api_roblox_user():
+    username = (request.args.get("username") or "").strip()
+    if not username:
+        return jsonify({"error": "Username required"}), 400
+    try:
+        response = requests.post(
+            "https://users.roblox.com/v1/usernames/users",
+            json={"usernames": [username], "excludeBannedUsers": False},
+            timeout=10
+        )
+        data = response.json()
+        if not data.get("data"):
+            return jsonify({"error": "User not found"}), 404
+        user = data["data"][0]
+        user_id = int(user["id"])
+        avatar_map = fetch_avatars_map([user_id])
+        avatar_url = avatar_map.get(user_id, "")
+
+        conn = get_db()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT * FROM bans WHERE user_id = %s AND active = TRUE", (user_id,))
+                ban = cur.fetchone()
+        finally:
+            release_db(conn)
+
+        return jsonify({
+            "user": {
+                "userId": user_id,
+                "username": user["name"],
+                "displayName": user.get("displayName") or user["name"],
+                "avatarUrl": avatar_url
+            },
+            "banned": bool(ban),
+            "ban": ban
+        })
+    except Exception:
+        return jsonify({"error": "Failed to fetch from Roblox API"}), 500
+
+@app.route("/api/bans", methods=["POST"])
+@require_auth
+def api_issue_ban():
+    data = request.get_json(silent=True) or {}
+    user_id = int(data.get("user_id", 0))
+    username = str(data.get("username", "")).strip()
+    display_name = str(data.get("display_name", username)).strip()
+    avatar_url = str(data.get("avatar_url", "")).strip()
+    reason = str(data.get("reason", "")).strip()
+    days = int(data.get("days", 0))
+    ban_alts = bool(data.get("ban_alts", False))
+    job_id = str(data.get("job_id", "")).strip()
+
+    if not user_id or not username or not reason:
+        return jsonify({"error": "Invalid payload"}), 400
+
+    expires_at = None
+    permanent = True
+    if days > 0:
+        expires_at = datetime.now(timezone.utc) + timedelta(days=days)
+        permanent = False
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO bans (user_id, username, display_name, avatar_url, reason, expires_at, permanent, alt_ban_requested, active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    username = EXCLUDED.username,
+                    display_name = EXCLUDED.display_name,
+                    avatar_url = EXCLUDED.avatar_url,
+                    reason = EXCLUDED.reason,
+                    expires_at = EXCLUDED.expires_at,
+                    permanent = EXCLUDED.permanent,
+                    alt_ban_requested = EXCLUDED.alt_ban_requested,
+                    active = TRUE
+            """, (user_id, username, display_name, avatar_url, reason, expires_at, permanent, ban_alts))
+
+            queue_jobs = set()
+            if job_id:
+                queue_jobs.add(job_id)
+            cur.execute("SELECT DISTINCT job_id FROM server_players WHERE user_id = %s", (user_id,))
+            for row in cur.fetchall():
+                queue_jobs.add(row[0])
+
+            payload = {
+                "reason": reason,
+                "days": days,
+                "ban_alts": ban_alts
+            }
+
+            for target_job_id in queue_jobs:
+                cur.execute("""
+                    INSERT INTO action_queue (job_id, user_id, action_type, payload_json, status)
+                    VALUES (%s, %s, 'ban', %s, 'pending')
+                """, (target_job_id, user_id, json.dumps(payload)))
+        return jsonify({"success": True})
+    finally:
+        release_db(conn)
+
+@app.route("/api/bans/<int:user_id>", methods=["DELETE"])
+@require_auth
+def api_issue_unban(user_id):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE bans SET active = FALSE WHERE user_id = %s", (user_id,))
+        return jsonify({"success": True})
+    finally:
+        release_db(conn)
+
+@app.route("/api/actions", methods=["POST"])
+@require_auth
+def api_queue_action():
+    data = request.get_json(silent=True) or {}
+    job_id = str(data.get("job_id", "")).strip()
+    user_id = int(data.get("user_id", 0))
+    action_type = str(data.get("action_type", "")).strip()
+    payload = data.get("payload", {}) if isinstance(data.get("payload", {}), dict) else {}
+
+    if not job_id or not action_type:
+        return jsonify({"error": "Invalid payload"}), 400
+
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO action_queue (job_id, user_id, action_type, payload_json, status)
+                VALUES (%s, %s, %s, %s, 'pending')
+            """, (job_id, user_id if user_id else None, action_type, json.dumps(payload)))
+        return jsonify({"success": True})
+    finally:
+        release_db(conn)
+
+@app.route("/api/servers/<job_id>/players/<int:user_id>/ping", methods=["POST"])
+@require_auth
+def api_request_ping(job_id, user_id):
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO action_queue (job_id, user_id, action_type, payload_json, status)
+                VALUES (%s, %s, 'get_ping', '{}'::jsonb, 'pending')
+            """, (job_id, user_id))
+        return jsonify({"success": True})
+    finally:
+        release_db(conn)
+
+@app.route("/roblox/offline", methods=["POST"])
+@require_roblox_auth
+def roblox_offline():
+    data = request.get_json(silent=True) or {}
+    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
+    if not job_id:
+        return jsonify({"error": "job_id required"}), 400
+    conn = get_db()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
+            cur.execute("DELETE FROM servers WHERE job_id = %s", (job_id,))
+        return jsonify({"success": True})
     finally:
         release_db(conn)
 
