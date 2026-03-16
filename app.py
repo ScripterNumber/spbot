@@ -39,7 +39,6 @@ def get_db():
 def release_db(conn):
     db_pool.putconn(conn)
 
-# Жесткая авто-починка базы данных при запуске
 def setup_database():
     conn = get_db()
     try:
@@ -61,8 +60,8 @@ def setup_database():
             """)
             cur.execute("ALTER TABLE server_players ADD COLUMN IF NOT EXISTS ping INT DEFAULT 0;")
             cur.execute("ALTER TABLE server_players ADD COLUMN IF NOT EXISTS avatar_url TEXT;")
-    except Exception as e:
-        print("DB Setup Warning:", e)
+    except Exception:
+        pass
     finally:
         release_db(conn)
 
@@ -227,11 +226,14 @@ def issue_ban():
     conn = get_db()
     try:
         with conn.cursor() as cur:
+            days = int(data.get('days', 0))
             expires_at = None
             permanent = True
-            if int(data.get('days', 0)) > 0:
-                expires_at = datetime.now(timezone.utc) + timedelta(days=int(data['days']))
+            if days > 0:
+                expires_at = datetime.now(timezone.utc) + timedelta(days=days)
                 permanent = False
+                
+            ban_alts = bool(data.get('ban_alts', False))
                 
             cur.execute("""
                 INSERT INTO bans (user_id, username, display_name, avatar_url, reason, expires_at, permanent, alt_ban_requested, active)
@@ -242,13 +244,18 @@ def issue_ban():
                 expires_at = EXCLUDED.expires_at,
                 permanent = EXCLUDED.permanent,
                 active = TRUE
-            """, (data['user_id'], data['username'], data['display_name'], data.get('avatar_url', ''), data['reason'], expires_at, permanent, data.get('ban_alts', False), True))
+            """, (data['user_id'], data['username'], data['display_name'], data.get('avatar_url', ''), data['reason'], expires_at, permanent, ban_alts, True))
             
             if 'job_id' in data:
+                payload = json.dumps({
+                    "reason": data['reason'],
+                    "days": days,
+                    "ban_alts": ban_alts
+                })
                 cur.execute("""
                     INSERT INTO action_queue (job_id, user_id, action_type, payload_json)
                     VALUES (%s, %s, %s, %s)
-                """, (data['job_id'], data['user_id'], 'kick', json.dumps({"reason": data['reason']})))
+                """, (data['job_id'], data['user_id'], 'ban', payload))
                 
         return jsonify({"success": True})
     finally:
@@ -377,31 +384,30 @@ def roblox_snapshot():
     job_id = data.get('job_id')
     players = data.get('players', [])
     
+    user_ids = [str(p.get('user_id', 0)) for p in players if p.get('user_id', 0)]
+    avatars = {}
+    if user_ids:
+        try:
+            res = requests.get(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={','.join(user_ids[:100])}&size=150x150&format=Png&isCircular=false", timeout=3)
+            if res.status_code == 200:
+                avatars = {str(item['targetId']): item['imageUrl'] for item in res.json().get('data', [])}
+        except Exception:
+            pass
+
     conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                INSERT INTO servers (job_id, last_seen_at) 
-                VALUES (%s, NOW()) 
-                ON CONFLICT (job_id) DO NOTHING
-            """, (job_id,))
-            
+            cur.execute("INSERT INTO servers (job_id, last_seen_at) VALUES (%s, NOW()) ON CONFLICT (job_id) DO NOTHING", (job_id,))
             cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
             for p in players:
-                # Жесткая защита типов
+                uid = int(p.get('user_id', 0))
+                avatar_url = avatars.get(str(uid), '')
                 cur.execute("""
                     INSERT INTO server_players (job_id, user_id, username, display_name, account_age, deaths, coins, ping, avatar_url, last_seen_at)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                 """, (
-                    job_id, 
-                    int(p.get('user_id', 0)), 
-                    str(p.get('username', 'Unknown')), 
-                    str(p.get('display_name', 'Unknown')), 
-                    int(p.get('account_age', 0)), 
-                    int(p.get('deaths', 0)), 
-                    int(p.get('coins', 0)), 
-                    int(p.get('ping', 0)), 
-                    str(p.get('avatar_url', ''))
+                    job_id, uid, str(p.get('username', 'Unknown')), str(p.get('display_name', 'Unknown')), 
+                    int(p.get('account_age', 0)), int(p.get('deaths', 0)), int(p.get('coins', 0)), int(p.get('ping', 0)), avatar_url
                 ))
         return jsonify({"success": True})
     finally:
