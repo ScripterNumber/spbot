@@ -35,6 +35,15 @@ for item in admins_raw:
 
 db_pool = pool.SimpleConnectionPool(1, 10, DB_URL)
 
+last_snapshot_debug = {
+    "received": False,
+    "jobId": None,
+    "playersCountRaw": 0,
+    "playersCountNormalized": 0,
+    "raw": None,
+    "error": None
+}
+
 def get_db():
     conn = db_pool.getconn()
     conn.autocommit = True
@@ -53,8 +62,8 @@ def setup_database():
                     place_id BIGINT,
                     started_at TIMESTAMPTZ DEFAULT NOW(),
                     last_seen_at TIMESTAMPTZ DEFAULT NOW(),
-                    player_count INT DEFAULT 0,
-                    tps REAL DEFAULT 20.0,
+                    player_count BIGINT DEFAULT 0,
+                    tps DOUBLE PRECISION DEFAULT 20.0,
                     first_players_json JSONB DEFAULT '[]'::jsonb
                 )
             """)
@@ -64,10 +73,10 @@ def setup_database():
                     user_id BIGINT NOT NULL,
                     username TEXT NOT NULL,
                     display_name TEXT NOT NULL,
-                    account_age INT DEFAULT 0,
-                    deaths INT DEFAULT 0,
-                    coins INT DEFAULT 0,
-                    ping INT DEFAULT 0,
+                    account_age BIGINT DEFAULT 0,
+                    deaths BIGINT DEFAULT 0,
+                    coins BIGINT DEFAULT 0,
+                    ping BIGINT DEFAULT 0,
                     avatar_url TEXT DEFAULT '',
                     last_seen_at TIMESTAMPTZ DEFAULT NOW(),
                     PRIMARY KEY (job_id, user_id)
@@ -98,9 +107,6 @@ def setup_database():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_job_id ON server_players(job_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_username ON server_players(username)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_display_name ON server_players(display_name)")
     finally:
         release_db(conn)
 
@@ -153,6 +159,63 @@ def require_roblox_auth(fn):
         return fn(*args, **kwargs)
     wrapper.__name__ = fn.__name__
     return wrapper
+
+def fetch_avatars_map(user_ids):
+    ids = []
+    seen = set()
+    for user_id in user_ids:
+        try:
+            uid = int(user_id)
+        except Exception:
+            continue
+        if uid <= 0 or uid in seen:
+            continue
+        ids.append(str(uid))
+        seen.add(uid)
+    if not ids:
+        return {}
+    result = {}
+    for i in range(0, len(ids), 100):
+        chunk = ids[i:i + 100]
+        try:
+            response = requests.get(
+                "https://thumbnails.roblox.com/v1/users/avatar-headshot",
+                params={
+                    "userIds": ",".join(chunk),
+                    "size": "150x150",
+                    "format": "Png",
+                    "isCircular": "false"
+                },
+                timeout=5
+            )
+            if response.status_code != 200:
+                continue
+            data = response.json().get("data", [])
+            for item in data:
+                target_id = int(item.get("targetId", 0))
+                image_url = item.get("imageUrl", "")
+                if target_id > 0 and image_url:
+                    result[target_id] = image_url
+        except Exception:
+            continue
+    return result
+
+def fetch_roblox_user_by_username(username):
+    response = requests.post(
+        "https://users.roblox.com/v1/usernames/users",
+        json={"usernames": [username], "excludeBannedUsers": False},
+        timeout=10
+    )
+    data = response.json()
+    if not data.get("data"):
+        return None
+    return data["data"][0]
+
+def fetch_roblox_user_by_id(user_id):
+    response = requests.get(f"https://users.roblox.com/v1/users/{user_id}", timeout=10)
+    if response.status_code != 200:
+        return None
+    return response.json()
 
 def normalize_players(raw_players):
     normalized = []
@@ -228,6 +291,10 @@ def debug_server_players():
     finally:
         release_db(conn)
 
+@app.route("/api/debug/last-snapshot")
+def debug_last_snapshot():
+    return jsonify(last_snapshot_debug)
+
 @app.route("/webhook", methods=["POST"])
 def telegram_webhook():
     data = request.get_json(silent=True) or {}
@@ -274,13 +341,15 @@ def roblox_heartbeat():
     if not job_id:
         return jsonify({"error": "jobId required"}), 400
 
+    avatar_map = fetch_avatars_map([player["user_id"] for player in players[:5]])
+
     preview_players = []
     for player in players[:5]:
         preview_players.append({
             "userId": player["user_id"],
             "username": player["username"],
             "displayName": player["display_name"],
-            "avatarUrl": ""
+            "avatarUrl": avatar_map.get(player["user_id"], "")
         })
 
     conn = get_db()
@@ -336,6 +405,8 @@ def roblox_heartbeat():
 @app.route("/roblox/snapshot", methods=["POST"])
 @require_roblox_auth
 def roblox_snapshot():
+    global last_snapshot_debug
+
     data = request.get_json(silent=True) or {}
     job_id = str(data.get("jobId", "")).strip()
     place_id = int(data.get("placeId", 0) or 0)
@@ -343,10 +414,23 @@ def roblox_snapshot():
     tps = float(data.get("tps", 20.0) or 20.0)
     players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
 
+    last_snapshot_debug = {
+        "received": True,
+        "jobId": job_id,
+        "playersCountRaw": len(players_raw),
+        "playersCountNormalized": 0,
+        "raw": data,
+        "error": None
+    }
+
     if not job_id:
+        last_snapshot_debug["error"] = "jobId required"
         return jsonify({"error": "jobId required"}), 400
 
     players = normalize_players(players_raw)
+    last_snapshot_debug["playersCountNormalized"] = len(players)
+
+    avatar_map = fetch_avatars_map([player["user_id"] for player in players])
 
     first_players = []
     for player in players[:5]:
@@ -354,7 +438,7 @@ def roblox_snapshot():
             "userId": player["user_id"],
             "username": player["username"],
             "displayName": player["display_name"],
-            "avatarUrl": ""
+            "avatarUrl": avatar_map.get(player["user_id"], "")
         })
 
     conn = get_db()
@@ -403,10 +487,12 @@ def roblox_snapshot():
                     player["deaths"],
                     player["coins"],
                     player["ping"],
-                    player["avatar_url"]
+                    avatar_map.get(player["user_id"], "")
                 ))
+
         return jsonify({"success": True, "players_saved": len(players)})
     except Exception as e:
+        last_snapshot_debug["error"] = str(e)
         return jsonify({"error": str(e)}), 500
     finally:
         release_db(conn)
@@ -605,16 +691,24 @@ def api_roblox_user():
     if not username:
         return jsonify({"error": "Username required"}), 400
     try:
-        response = requests.post(
-            "https://users.roblox.com/v1/usernames/users",
-            json={"usernames": [username], "excludeBannedUsers": False},
-            timeout=10
-        )
-        data = response.json()
-        if not data.get("data"):
+        user = fetch_roblox_user_by_username(username)
+        if not user:
             return jsonify({"error": "User not found"}), 404
-        user = data["data"][0]
+
         user_id = int(user["id"])
+        avatar_map = fetch_avatars_map([user_id])
+        avatar_url = avatar_map.get(user_id, "")
+
+        full_user = fetch_roblox_user_by_id(user_id)
+        account_age = 0
+        if full_user:
+            try:
+                created_raw = full_user.get("created")
+                if created_raw:
+                    created_dt = datetime.fromisoformat(created_raw.replace("Z", "+00:00"))
+                    account_age = max(0, (datetime.now(timezone.utc) - created_dt).days)
+            except Exception:
+                account_age = 0
 
         conn = get_db()
         try:
@@ -629,7 +723,8 @@ def api_roblox_user():
                 "userId": user_id,
                 "username": user["name"],
                 "displayName": user.get("displayName") or user["name"],
-                "avatarUrl": ""
+                "avatarUrl": avatar_url,
+                "accountAge": account_age
             },
             "banned": bool(ban),
             "ban": ban
