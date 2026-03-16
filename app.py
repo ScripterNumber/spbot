@@ -4,6 +4,7 @@ import hmac
 import hashlib
 import requests
 from urllib.parse import parse_qsl
+from datetime import datetime, timedelta, timezone
 from flask import Flask, request, jsonify, send_from_directory
 import psycopg2
 from psycopg2 import pool
@@ -244,6 +245,17 @@ def debug_server_players():
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM server_players ORDER BY last_seen_at DESC LIMIT 100")
+            rows = cur.fetchall()
+            return jsonify({"rows": rows})
+    finally:
+        release_db(conn)
+
+@app.route("/api/debug/servers")
+def debug_servers():
+    conn = get_db()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT * FROM servers ORDER BY last_seen_at DESC LIMIT 100")
             rows = cur.fetchall()
             return jsonify({"rows": rows})
     finally:
