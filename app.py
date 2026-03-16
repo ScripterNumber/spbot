@@ -154,46 +154,6 @@ def require_roblox_auth(fn):
     wrapper.__name__ = fn.__name__
     return wrapper
 
-def fetch_avatars_map(user_ids):
-    ids = []
-    seen = set()
-    for user_id in user_ids:
-        try:
-            uid = int(user_id)
-        except Exception:
-            continue
-        if uid <= 0 or uid in seen:
-            continue
-        ids.append(str(uid))
-        seen.add(uid)
-    if not ids:
-        return {}
-    result = {}
-    for i in range(0, len(ids), 100):
-        chunk = ids[i:i + 100]
-        try:
-            response = requests.get(
-                "https://thumbnails.roblox.com/v1/users/avatar-headshot",
-                params={
-                    "userIds": ",".join(chunk),
-                    "size": "150x150",
-                    "format": "Png",
-                    "isCircular": "false"
-                },
-                timeout=5
-            )
-            if response.status_code != 200:
-                continue
-            data = response.json().get("data", [])
-            for item in data:
-                target_id = int(item.get("targetId", 0))
-                image_url = item.get("imageUrl", "")
-                if target_id > 0 and image_url:
-                    result[target_id] = image_url
-        except Exception:
-            continue
-    return result
-
 def normalize_players(raw_players):
     normalized = []
     for player in raw_players:
@@ -235,7 +195,8 @@ def normalize_players(raw_players):
             "account_age": account_age,
             "deaths": deaths,
             "coins": coins,
-            "ping": ping
+            "ping": ping,
+            "avatar_url": ""
         })
     return normalized
 
@@ -313,21 +274,14 @@ def roblox_heartbeat():
     if not job_id:
         return jsonify({"error": "jobId required"}), 400
 
-    preview_ids = []
     preview_players = []
     for player in players[:5]:
-        preview_ids.append(player["user_id"])
         preview_players.append({
             "userId": player["user_id"],
             "username": player["username"],
             "displayName": player["display_name"],
             "avatarUrl": ""
         })
-
-    avatar_map = fetch_avatars_map(preview_ids)
-    for item in preview_players:
-        if item["userId"] in avatar_map:
-            item["avatarUrl"] = avatar_map[item["userId"]]
 
     conn = get_db()
     try:
@@ -393,7 +347,6 @@ def roblox_snapshot():
         return jsonify({"error": "jobId required"}), 400
 
     players = normalize_players(players_raw)
-    avatar_map = fetch_avatars_map([player["user_id"] for player in players])
 
     first_players = []
     for player in players[:5]:
@@ -401,7 +354,7 @@ def roblox_snapshot():
             "userId": player["user_id"],
             "username": player["username"],
             "displayName": player["display_name"],
-            "avatarUrl": avatar_map.get(player["user_id"], "")
+            "avatarUrl": ""
         })
 
     conn = get_db()
@@ -450,9 +403,11 @@ def roblox_snapshot():
                     player["deaths"],
                     player["coins"],
                     player["ping"],
-                    avatar_map.get(player["user_id"], "")
+                    player["avatar_url"]
                 ))
         return jsonify({"success": True, "players_saved": len(players)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
     finally:
         release_db(conn)
 
@@ -660,8 +615,6 @@ def api_roblox_user():
             return jsonify({"error": "User not found"}), 404
         user = data["data"][0]
         user_id = int(user["id"])
-        avatar_map = fetch_avatars_map([user_id])
-        avatar_url = avatar_map.get(user_id, "")
 
         conn = get_db()
         try:
@@ -676,7 +629,7 @@ def api_roblox_user():
                 "userId": user_id,
                 "username": user["name"],
                 "displayName": user.get("displayName") or user["name"],
-                "avatarUrl": avatar_url
+                "avatarUrl": ""
             },
             "banned": bool(ban),
             "ban": ban
