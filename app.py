@@ -253,8 +253,6 @@ def debug_server_players():
 @require_roblox_auth
 def roblox_snapshot():
     data = request.get_json(silent=True) or {}
-    print("SNAPSHOT RAW:", data)
-
     job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
     place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
     player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
@@ -265,8 +263,6 @@ def roblox_snapshot():
         return jsonify({"error": "job_id required"}), 400
 
     players = normalize_players(players_raw)
-    print("SNAPSHOT NORMALIZED COUNT:", len(players))
-
     avatar_map = fetch_avatars_map([player["user_id"] for player in players])
 
     first_players = []
@@ -327,9 +323,6 @@ def roblox_snapshot():
                     avatar_map.get(player["user_id"], "")
                 ))
         return jsonify({"success": True, "players_saved": len(players)})
-    except Exception as e:
-        print("SNAPSHOT ERROR:", str(e))
-        return jsonify({"error": str(e)}), 500
     finally:
         release_db(conn)
 
@@ -495,36 +488,6 @@ def api_server_detail(job_id):
                 })
 
         return jsonify({"server": server, "players": players})
-    finally:
-        release_db(conn)
-
-@app.route("/api/servers/<job_id>/players/<int:user_id>", methods=["GET"])
-@require_auth
-def api_server_player(job_id, user_id):
-    conn = get_db()
-    try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT job_id, user_id, username, display_name, account_age, deaths, coins, ping, avatar_url, last_seen_at
-                FROM server_players
-                WHERE job_id = %s AND user_id = %s
-            """, (job_id, user_id))
-            row = cur.fetchone()
-            if not row:
-                return jsonify({"error": "Player not found"}), 404
-            return jsonify({
-                "player": {
-                    "jobId": row["job_id"],
-                    "userId": int(row["user_id"]),
-                    "username": row["username"],
-                    "displayName": row["display_name"],
-                    "accountAge": int(row.get("account_age", 0) or 0),
-                    "deaths": int(row.get("deaths", 0) or 0),
-                    "coins": int(row.get("coins", 0) or 0),
-                    "ping": int(row.get("ping", 0) or 0),
-                    "avatarUrl": row.get("avatar_url", "")
-                }
-            })
     finally:
         release_db(conn)
 
