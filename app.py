@@ -33,24 +33,18 @@ for item in admins_raw:
 
 db_pool = pool.SimpleConnectionPool(1, 10, DB_URL)
 
-def db():
+def get_db():
     conn = db_pool.getconn()
     conn.autocommit = True
     return conn
 
-def db_release(conn):
+def release_db(conn):
     db_pool.putconn(conn)
 
 def setup_database():
-    conn = db()
+    conn = get_db()
     try:
         with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS moderators (
-                    telegram_id BIGINT PRIMARY KEY,
-                    created_at TIMESTAMPTZ DEFAULT NOW()
-                )
-            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS servers (
                     job_id TEXT PRIMARY KEY,
@@ -102,15 +96,8 @@ def setup_database():
                     created_at TIMESTAMPTZ DEFAULT NOW()
                 )
             """)
-            cur.execute("ALTER TABLE server_players ADD COLUMN IF NOT EXISTS ping INT DEFAULT 0")
-            cur.execute("ALTER TABLE server_players ADD COLUMN IF NOT EXISTS avatar_url TEXT DEFAULT ''")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_job_id ON server_players(job_id)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_username ON server_players(username)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_server_players_display_name ON server_players(display_name)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_servers_last_seen_at ON servers(last_seen_at)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_action_queue_job_status ON action_queue(job_id, status)")
     finally:
-        db_release(conn)
+        release_db(conn)
 
 setup_database()
 
@@ -202,9 +189,9 @@ def fetch_avatars_map(user_ids):
             continue
     return result
 
-def normalize_snapshot_players(players):
-    normalized_players = []
-    for player in players:
+def normalize_players(raw_players):
+    normalized = []
+    for player in raw_players:
         if not isinstance(player, dict):
             continue
         raw_user_id = player.get("user_id", player.get("userId", 0))
@@ -232,7 +219,7 @@ def normalize_snapshot_players(players):
             ping = int(player.get("ping", player.get("lastPingMs", 0)) or 0)
         except Exception:
             ping = 0
-        normalized_players.append({
+        normalized.append({
             "user_id": user_id,
             "username": username,
             "display_name": display_name,
@@ -241,7 +228,7 @@ def normalize_snapshot_players(players):
             "coins": coins,
             "ping": ping
         })
-    return normalized_players
+    return normalized
 
 @app.route("/")
 def index():
@@ -285,62 +272,93 @@ def telegram_webhook():
 
 @app.route("/api/servers", methods=["GET"])
 @require_auth
-def get_servers():
-    conn = db()
+def api_servers():
+    conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("DELETE FROM servers WHERE last_seen_at < NOW() - INTERVAL '180 seconds'")
             cur.execute("DELETE FROM server_players WHERE job_id NOT IN (SELECT job_id FROM servers)")
             cur.execute("SELECT * FROM servers ORDER BY player_count DESC, last_seen_at DESC")
-            servers = cur.fetchall()
-            for server in servers:
-                first_players = server.get("first_players_json") or []
+            rows = cur.fetchall()
+            servers = []
+            for row in rows:
+                first_players = row.get("first_players_json") or []
                 if isinstance(first_players, str):
                     try:
                         first_players = json.loads(first_players)
                     except Exception:
                         first_players = []
-                server["firstPlayers"] = first_players
-                if "first_players_json" in server:
-                    del server["first_players_json"]
+                servers.append({
+                    "jobId": row["job_id"],
+                    "placeId": row.get("place_id"),
+                    "startedAt": row.get("started_at"),
+                    "lastSeenAt": row.get("last_seen_at"),
+                    "playerCount": int(row.get("player_count", 0) or 0),
+                    "tps": float(row.get("tps", 0) or 0),
+                    "firstPlayers": first_players
+                })
         return jsonify({"servers": servers})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/api/servers/<job_id>", methods=["GET"])
 @require_auth
-def get_server_detail(job_id):
-    conn = db()
+def api_server_detail(job_id):
+    conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT * FROM servers WHERE job_id = %s", (job_id,))
-            server = cur.fetchone()
-            if not server:
+            server_row = cur.fetchone()
+            if not server_row:
                 return jsonify({"error": "Server not found"}), 404
+
+            first_players = server_row.get("first_players_json") or []
+            if isinstance(first_players, str):
+                try:
+                    first_players = json.loads(first_players)
+                except Exception:
+                    first_players = []
+
             cur.execute("""
                 SELECT job_id, user_id, username, display_name, account_age, deaths, coins, ping, avatar_url, last_seen_at
                 FROM server_players
                 WHERE job_id = %s
                 ORDER BY LOWER(display_name), LOWER(username)
             """, (job_id,))
-            players = cur.fetchall()
-            first_players = server.get("first_players_json") or []
-            if isinstance(first_players, str):
-                try:
-                    first_players = json.loads(first_players)
-                except Exception:
-                    first_players = []
-            server["firstPlayers"] = first_players
-            if "first_players_json" in server:
-                del server["first_players_json"]
+            player_rows = cur.fetchall()
+
+            server = {
+                "jobId": server_row["job_id"],
+                "placeId": server_row.get("place_id"),
+                "startedAt": server_row.get("started_at"),
+                "lastSeenAt": server_row.get("last_seen_at"),
+                "playerCount": int(server_row.get("player_count", 0) or 0),
+                "tps": float(server_row.get("tps", 0) or 0),
+                "firstPlayers": first_players
+            }
+
+            players = []
+            for row in player_rows:
+                players.append({
+                    "jobId": row["job_id"],
+                    "userId": int(row["user_id"]),
+                    "username": row["username"],
+                    "displayName": row["display_name"],
+                    "accountAge": int(row.get("account_age", 0) or 0),
+                    "deaths": int(row.get("deaths", 0) or 0),
+                    "coins": int(row.get("coins", 0) or 0),
+                    "ping": int(row.get("ping", 0) or 0),
+                    "avatarUrl": row.get("avatar_url", "")
+                })
+
         return jsonify({"server": server, "players": players})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/api/servers/<job_id>/players/<int:user_id>", methods=["GET"])
 @require_auth
-def get_player_detail(job_id, user_id):
-    conn = db()
+def api_server_player(job_id, user_id):
+    conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
@@ -348,20 +366,32 @@ def get_player_detail(job_id, user_id):
                 FROM server_players
                 WHERE job_id = %s AND user_id = %s
             """, (job_id, user_id))
-            player = cur.fetchone()
-            if not player:
+            row = cur.fetchone()
+            if not row:
                 return jsonify({"error": "Player not found"}), 404
-        return jsonify({"player": player})
+            return jsonify({
+                "player": {
+                    "jobId": row["job_id"],
+                    "userId": int(row["user_id"]),
+                    "username": row["username"],
+                    "displayName": row["display_name"],
+                    "accountAge": int(row.get("account_age", 0) or 0),
+                    "deaths": int(row.get("deaths", 0) or 0),
+                    "coins": int(row.get("coins", 0) or 0),
+                    "ping": int(row.get("ping", 0) or 0),
+                    "avatarUrl": row.get("avatar_url", "")
+                }
+            })
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/api/search/players", methods=["GET"])
 @require_auth
-def search_players():
+def api_search_players():
     q = (request.args.get("q") or "").strip()
     if not q:
         return jsonify({"results": []})
-    conn = db()
+    conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             pattern = f"%{q}%"
@@ -388,31 +418,32 @@ def search_players():
             rows = cur.fetchall()
             results = []
             for row in rows:
-                player = {
-                    "job_id": row["job_id"],
-                    "user_id": row["user_id"],
-                    "username": row["username"],
-                    "display_name": row["display_name"],
-                    "account_age": row["account_age"],
-                    "deaths": row["deaths"],
-                    "coins": row["coins"],
-                    "ping": row["ping"],
-                    "avatar_url": row["avatar_url"]
-                }
-                server = {
-                    "job_id": row["job_id"],
-                    "player_count": row["player_count"],
-                    "tps": row["tps"],
-                    "started_at": row["started_at"]
-                }
-                results.append({"player": player, "server": server})
+                results.append({
+                    "player": {
+                        "jobId": row["job_id"],
+                        "userId": int(row["user_id"]),
+                        "username": row["username"],
+                        "displayName": row["display_name"],
+                        "accountAge": int(row.get("account_age", 0) or 0),
+                        "deaths": int(row.get("deaths", 0) or 0),
+                        "coins": int(row.get("coins", 0) or 0),
+                        "ping": int(row.get("ping", 0) or 0),
+                        "avatarUrl": row.get("avatar_url", "")
+                    },
+                    "server": {
+                        "jobId": row["job_id"],
+                        "playerCount": int(row.get("player_count", 0) or 0),
+                        "tps": float(row.get("tps", 0) or 0),
+                        "startedAt": row.get("started_at")
+                    }
+                })
         return jsonify({"results": results})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/api/roblox/user", methods=["GET"])
 @require_auth
-def roblox_user_lookup():
+def api_roblox_user():
     username = (request.args.get("username") or "").strip()
     if not username:
         return jsonify({"error": "Username required"}), 400
@@ -427,15 +458,17 @@ def roblox_user_lookup():
             return jsonify({"error": "User not found"}), 404
         user = data["data"][0]
         user_id = int(user["id"])
-        avatars = fetch_avatars_map([user_id])
-        avatar_url = avatars.get(user_id, "")
-        conn = db()
+        avatar_map = fetch_avatars_map([user_id])
+        avatar_url = avatar_map.get(user_id, "")
+
+        conn = get_db()
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT * FROM bans WHERE user_id = %s AND active = TRUE", (user_id,))
                 ban = cur.fetchone()
         finally:
-            db_release(conn)
+            release_db(conn)
+
         return jsonify({
             "user": {
                 "userId": user_id,
@@ -451,7 +484,7 @@ def roblox_user_lookup():
 
 @app.route("/api/bans", methods=["POST"])
 @require_auth
-def issue_ban():
+def api_issue_ban():
     data = request.get_json(silent=True) or {}
     user_id = int(data.get("user_id", 0))
     username = str(data.get("username", "")).strip()
@@ -468,10 +501,11 @@ def issue_ban():
     expires_at = None
     permanent = True
     if days > 0:
+        from datetime import datetime, timezone, timedelta
         expires_at = datetime.now(timezone.utc) + timedelta(days=days)
         permanent = False
 
-    conn = db()
+    conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -508,22 +542,22 @@ def issue_ban():
                 """, (target_job_id, user_id, json.dumps(payload)))
         return jsonify({"success": True})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/api/bans/<int:user_id>", methods=["DELETE"])
 @require_auth
-def issue_unban(user_id):
-    conn = db()
+def api_issue_unban(user_id):
+    conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute("UPDATE bans SET active = FALSE WHERE user_id = %s", (user_id,))
         return jsonify({"success": True})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/api/actions", methods=["POST"])
 @require_auth
-def queue_action():
+def api_queue_action():
     data = request.get_json(silent=True) or {}
     job_id = str(data.get("job_id", "")).strip()
     user_id = int(data.get("user_id", 0))
@@ -533,7 +567,7 @@ def queue_action():
     if not job_id or not action_type:
         return jsonify({"error": "Invalid payload"}), 400
 
-    conn = db()
+    conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -542,12 +576,12 @@ def queue_action():
             """, (job_id, user_id if user_id else None, action_type, json.dumps(payload)))
         return jsonify({"success": True})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/api/servers/<job_id>/players/<int:user_id>/ping", methods=["POST"])
 @require_auth
-def request_ping(job_id, user_id):
-    conn = db()
+def api_request_ping(job_id, user_id):
+    conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -556,7 +590,7 @@ def request_ping(job_id, user_id):
             """, (job_id, user_id))
         return jsonify({"success": True})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/roblox/heartbeat", methods=["POST"])
 @require_roblox_auth
@@ -567,7 +601,7 @@ def roblox_heartbeat():
     player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
     tps = float(data.get("tps", 20.0) or 20.0)
     players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
-    players = normalize_snapshot_players(players_raw)
+    players = normalize_players(players_raw)
 
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
@@ -588,7 +622,7 @@ def roblox_heartbeat():
         if item["userId"] in avatar_map:
             item["avatarUrl"] = avatar_map[item["userId"]]
 
-    conn = db()
+    conn = get_db()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
@@ -636,7 +670,7 @@ def roblox_heartbeat():
 
         return jsonify({"actions": normalized_actions, "active_bans": bans})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/roblox/snapshot", methods=["POST"])
 @require_roblox_auth
@@ -651,7 +685,7 @@ def roblox_snapshot():
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
 
-    players = normalize_snapshot_players(players_raw)
+    players = normalize_players(players_raw)
     avatar_map = fetch_avatars_map([player["user_id"] for player in players])
 
     first_players = []
@@ -663,7 +697,7 @@ def roblox_snapshot():
             "avatarUrl": avatar_map.get(player["user_id"], "")
         })
 
-    conn = db()
+    conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute("""
@@ -713,7 +747,7 @@ def roblox_snapshot():
                 ))
         return jsonify({"success": True, "players_saved": len(players)})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 @app.route("/roblox/offline", methods=["POST"])
 @require_roblox_auth
@@ -722,14 +756,14 @@ def roblox_offline():
     job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
     if not job_id:
         return jsonify({"error": "job_id required"}), 400
-    conn = db()
+    conn = get_db()
     try:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM server_players WHERE job_id = %s", (job_id,))
             cur.execute("DELETE FROM servers WHERE job_id = %s", (job_id,))
         return jsonify({"success": True})
     finally:
-        db_release(conn)
+        release_db(conn)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
