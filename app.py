@@ -199,17 +199,20 @@ def normalize_players(raw_players):
     for player in raw_players:
         if not isinstance(player, dict):
             continue
-        raw_user_id = player.get("user_id", player.get("userId", 0))
+
+        raw_user_id = player.get("userId", 0)
         try:
             user_id = int(raw_user_id)
         except Exception:
             continue
         if user_id <= 0:
             continue
-        username = str(player.get("username", player.get("name", user_id))).strip() or str(user_id)
-        display_name = str(player.get("display_name", player.get("displayName", username))).strip() or username
+
+        username = str(player.get("username", user_id)).strip() or str(user_id)
+        display_name = str(player.get("displayName", username)).strip() or username
+
         try:
-            account_age = int(player.get("account_age", player.get("accountAge", 0)) or 0)
+            account_age = int(player.get("accountAge", 0) or 0)
         except Exception:
             account_age = 0
         try:
@@ -221,9 +224,10 @@ def normalize_players(raw_players):
         except Exception:
             coins = 0
         try:
-            ping = int(player.get("ping", player.get("lastPingMs", 0)) or 0)
+            ping = int(player.get("ping", 0) or 0)
         except Exception:
             ping = 0
+
         normalized.append({
             "user_id": user_id,
             "username": username,
@@ -299,15 +303,15 @@ def telegram_webhook():
 @require_roblox_auth
 def roblox_heartbeat():
     data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
-    place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
-    player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
+    job_id = str(data.get("jobId", "")).strip()
+    place_id = int(data.get("placeId", 0) or 0)
+    player_count = int(data.get("playerCount", 0) or 0)
     tps = float(data.get("tps", 20.0) or 20.0)
     players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
     players = normalize_players(players_raw)
 
     if not job_id:
-        return jsonify({"error": "job_id required"}), 400
+        return jsonify({"error": "jobId required"}), 400
 
     preview_ids = []
     preview_players = []
@@ -379,14 +383,14 @@ def roblox_heartbeat():
 @require_roblox_auth
 def roblox_snapshot():
     data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
-    place_id = int(data.get("place_id", data.get("placeId", 0)) or 0)
-    player_count = int(data.get("player_count", data.get("playerCount", 0)) or 0)
+    job_id = str(data.get("jobId", "")).strip()
+    place_id = int(data.get("placeId", 0) or 0)
+    player_count = int(data.get("playerCount", 0) or 0)
     tps = float(data.get("tps", 20.0) or 20.0)
     players_raw = data.get("players", []) if isinstance(data.get("players", []), list) else []
 
     if not job_id:
-        return jsonify({"error": "job_id required"}), 400
+        return jsonify({"error": "jobId required"}), 400
 
     players = normalize_players(players_raw)
     avatar_map = fetch_avatars_map([player["user_id"] for player in players])
@@ -456,9 +460,9 @@ def roblox_snapshot():
 @require_roblox_auth
 def roblox_offline():
     data = request.get_json(silent=True) or {}
-    job_id = str(data.get("job_id", data.get("jobId", ""))).strip()
+    job_id = str(data.get("jobId", "")).strip()
     if not job_id:
-        return jsonify({"error": "job_id required"}), 400
+        return jsonify({"error": "jobId required"}), 400
     conn = get_db()
     try:
         with conn.cursor() as cur:
