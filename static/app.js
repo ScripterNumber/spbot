@@ -48,11 +48,6 @@ const App = (() => {
         <path d="M20 4v7h-7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
     `,
-    bolt: `
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-        <path d="M13 2L5 13h5l-1 9 8-11h-5l1-9Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-      </svg>
-    `,
     close: `
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
         <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
@@ -462,7 +457,7 @@ const App = (() => {
 
       const killBtn = e.target.closest("[data-action-kill]");
       if (killBtn) {
-        executePlayerAction(killBtn.dataset.jobId, Number(killBtn.dataset.actionKill), "kill");
+        executePlayerAction(killBtn.dataset.jobId, Number(kickBtn.dataset.actionKill), "kill");
       }
 
       const banBtn = e.target.closest("[data-action-ban]");
@@ -556,7 +551,7 @@ const App = (() => {
     clearInterval(state.intervals.servers);
     state.intervals.servers = setInterval(() => {
       loadServers(false);
-    }, 30000);
+    }, 15000);
   }
 
   function startCurrentServerPolling(jobId) {
@@ -565,7 +560,7 @@ const App = (() => {
       if (state.currentServer?.jobId === jobId) {
         refreshServerModal(jobId, false);
       }
-    }, 15000);
+    }, 8000);
   }
 
   function startCurrentPlayerPolling(jobId, userId) {
@@ -574,7 +569,7 @@ const App = (() => {
       if (state.currentPlayer && state.currentPlayer.jobId === jobId && state.currentPlayer.userId === userId) {
         refreshPlayerModal(jobId, userId, false);
       }
-    }, 5000);
+    }, 4000);
   }
 
   async function api(path, options = {}) {
@@ -610,7 +605,7 @@ const App = (() => {
   async function loadServers(showToastFlag = false) {
     try {
       const data = await api("/api/servers");
-      const servers = Array.isArray(data?.servers) ? data.servers.map(normalizeServer) : Array.isArray(data) ? data.map(normalizeServer) : [];
+      const servers = Array.isArray(data?.servers) ? data.servers.map(normalizeServer) : [];
       state.servers = servers.sort((a, b) => b.playerCount - a.playerCount);
       renderSummary();
       renderHome();
@@ -629,9 +624,9 @@ const App = (() => {
     const jobId = raw.job_id || raw.jobId || "";
     const playerCount = Number(raw.player_count ?? raw.playerCount ?? 0);
     const tps = Number(raw.tps ?? raw.server_tps ?? 0);
-    const startedAt = raw.started_at || raw.startedAt || raw.created_at || null;
+    const startedAt = raw.started_at || raw.startedAt || null;
     const uptimeMinutes = Number(raw.uptime_minutes ?? raw.uptimeMinutes ?? computeUptimeMinutes(startedAt));
-    const firstPlayersRaw = raw.first_players || raw.firstPlayers || raw.preview_players || raw.players_preview || [];
+    const firstPlayersRaw = raw.first_players || raw.firstPlayers || [];
     const firstPlayers = Array.isArray(firstPlayersRaw) ? firstPlayersRaw.slice(0, 5).map(normalizePlayer) : [];
     return {
       jobId,
@@ -654,7 +649,7 @@ const App = (() => {
       accountAge: Number(raw.account_age ?? raw.accountAge ?? 0),
       deaths: Number(raw.deaths ?? 0),
       coins: Number(raw.coins ?? 0),
-      ping: raw.ping ?? null,
+      ping: raw.ping ?? raw.lastPingMs ?? null,
       avatarUrl
     };
   }
@@ -813,7 +808,7 @@ const App = (() => {
 
     try {
       const data = await api(`/api/search/players?q=${encodeURIComponent(q)}`);
-      const results = Array.isArray(data?.results) ? data.results : Array.isArray(data) ? data : [];
+      const results = Array.isArray(data?.results) ? data.results : [];
 
       if (!results.length) {
         state.ui.searchResults.innerHTML = `
@@ -828,8 +823,8 @@ const App = (() => {
       }
 
       state.ui.searchResults.innerHTML = results.map(item => {
-        const player = normalizePlayer(item.player || item);
-        const server = normalizeServer(item.server || { job_id: item.job_id, player_count: item.player_count, tps: item.tps, started_at: item.started_at });
+        const player = normalizePlayer(item.player || {});
+        const server = normalizeServer(item.server || {});
         return `
           <div class="search-card">
             <div class="search-avatar">
@@ -879,7 +874,7 @@ const App = (() => {
 
     try {
       const data = await api(`/api/roblox/user?username=${encodeURIComponent(username)}`);
-      const player = normalizePlayer(data?.user || data);
+      const player = normalizePlayer(data?.user || {});
       const banInfo = data?.ban || null;
       state.banLookup = {
         ...player,
@@ -983,17 +978,13 @@ const App = (() => {
 
   async function refreshServerModal(jobId, openIfMissing = false) {
     const data = await api(`/api/servers/${encodeURIComponent(jobId)}`);
-    const server = normalizeServer(data?.server || data);
-    const playersRaw = Array.isArray(data?.players) ? data.players : Array.isArray(data?.server_players) ? data.server_players : [];
+    const server = normalizeServer(data?.server || {});
+    const playersRaw = Array.isArray(data?.players) ? data.players : [];
     const players = playersRaw.map(normalizePlayer);
     server.players = players;
     state.currentServer = server;
 
-    if (openIfMissing || !document.querySelector(".modal[data-modal='server']")) {
-      renderServerModal(server);
-    } else {
-      renderServerModal(server);
-    }
+    renderServerModal(server);
 
     if (state.currentPlayer && state.currentPlayer.jobId === jobId) {
       const exists = players.some(p => p.userId === state.currentPlayer.userId);
@@ -1104,14 +1095,11 @@ const App = (() => {
     }
   }
 
-  async function refreshPlayerModal(jobId, userId, openIfMissing = false) {
+  async function refreshPlayerModal(jobId, userId) {
     const data = await api(`/api/servers/${encodeURIComponent(jobId)}/players/${userId}`);
-    const player = normalizePlayer(data?.player || data);
+    const player = normalizePlayer(data?.player || {});
     player.jobId = jobId;
     state.currentPlayer = player;
-
-    const parentServerModal = document.querySelector(".modal[data-modal='server']");
-    if (!parentServerModal && !openIfMissing) return;
 
     const existing = document.querySelector(".modal[data-modal='player']");
     const modalHtml = `
@@ -1246,8 +1234,8 @@ const App = (() => {
       state.pingCooldowns.set(key, Date.now() + 5000);
       showToast("Запрос отправлен", "Сервер получил команду измерить пинг игрока.");
       setTimeout(() => {
-        refreshPlayerModal(jobId, userId, false).catch(() => {});
-      }, 1200);
+        refreshPlayerModal(jobId, userId).catch(() => {});
+      }, 1500);
     } catch (err) {
       showToast("Ошибка запроса пинга", err.message || "Не удалось запросить пинг.");
     } finally {
